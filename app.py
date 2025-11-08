@@ -1,6 +1,6 @@
 import os
 import time
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 import requests
 from bs4 import BeautifulSoup
 import json
@@ -23,19 +23,32 @@ def ping():
     return jsonify({"status": "ok"})
 
 # -----------------------------
+# Helper : récupérer le rootPlaceId depuis l'univers
+# -----------------------------
+def get_root_place_id_from_universe(universe_id):
+    url = f"https://games.roproxy.com/v1/games?universeIds={universe_id}"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if "data" in data and len(data["data"]) > 0:
+                return data["data"][0]["rootPlaceId"]
+    except Exception as e:
+        print(f"[API] Failed to get rootPlaceId from universe {universe_id}: {e}")
+    return None
+
+# -----------------------------
 # Récupère HTML depuis roproxy
 # -----------------------------
 def fetch_html(place_id, timeout=10):
     url = f"https://www.roproxy.com/games/getgamepassesinnerpartial?startIndex=0&maxRows=50&placeId={place_id}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0"
     }
     try:
         r = requests.get(url, headers=headers, timeout=timeout)
         if r.status_code == 200 and "real-game-pass" in r.text:
             return r.text
-        else:
-            print(f"[GamePassAPI] Unexpected status or no game passes at {url} (status {r.status_code})")
     except Exception as e:
         print(f"[GamePassAPI] Failed to fetch {url}: {e}")
     return None
@@ -71,33 +84,47 @@ def parse_gamepasses(html, place_id):
     return gamepasses
 
 # -----------------------------
+# Fallback : essaye rootPlaceId si aucun gamepass trouvé
+# -----------------------------
+def fetch_gamepasses(place_id, universe_id=None):
+    # 1️⃣ Essayer le placeId
+    html = fetch_html(place_id)
+    passes = parse_gamepasses(html, place_id) if html else []
+
+    # 2️⃣ Si vide et qu'on a un universeId, fallback avec rootPlaceId
+    if not passes and universe_id:
+        root_place_id = get_root_place_id_from_universe(universe_id)
+        if root_place_id:
+            html = fetch_html(root_place_id)
+            passes = parse_gamepasses(html, root_place_id) if html else []
+
+    return passes
+
+# -----------------------------
 # Route principale /gamepasses/<place_id>
 # -----------------------------
 @app.route("/gamepasses/<int:place_id>")
 def get_gamepasses(place_id):
+    # Optionnel : récupérer universeId depuis query params
+    universe_id = None
+    if "universeId" in dict(request.args):
+        try:
+            universe_id = int(request.args.get("universeId"))
+        except:
+            pass
+
     # Vérifier le cache
     if place_id in cache:
         ts, data = cache[place_id]
         if time.time() - ts < CACHE_DURATION:
             return Response(json.dumps(data, indent=2), mimetype="application/json")
 
-    html = fetch_html(place_id)
-
-    if not html:
-        result = {
-            "error": "failed_to_fetch",
-            "message": f"No valid HTML received from roproxy for placeId {place_id}",
-            "gamepasses": [],
-            "placeId": place_id
-        }
-        return Response(json.dumps(result, indent=2), mimetype="application/json")
-
-    gamepasses = parse_gamepasses(html, place_id)
+    passes = fetch_gamepasses(place_id, universe_id)
 
     # Sauvegarder dans le cache
-    cache[place_id] = (time.time(), gamepasses)
+    cache[place_id] = (time.time(), passes)
 
-    return Response(json.dumps(gamepasses, indent=2), mimetype="application/json")
+    return Response(json.dumps(passes, indent=2), mimetype="application/json")
 
 # -----------------------------
 # Main
