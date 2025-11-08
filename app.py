@@ -1,11 +1,19 @@
 import os
-from flask import Flask, jsonify
+import time
+from flask import Flask, Response, jsonify
 import requests
 from bs4 import BeautifulSoup
+import json
 
 app = Flask(__name__)
 
 DEFAULT_ICON = "https://tr.rbxcdn.com/180DAY-9babd76e0a0b581e7f689f06cac80194/150/150/Image/Webp/noFilter"
+
+# -----------------------------
+# Cache interne
+# -----------------------------
+CACHE_DURATION = 10 * 60  # 10 minutes
+cache = {}  # placeId -> (timestamp, data)
 
 # -----------------------------
 # Route test / ping
@@ -15,60 +23,81 @@ def ping():
     return jsonify({"status": "ok"})
 
 # -----------------------------
-# Route pour récupérer les gamepasses
+# Récupère HTML depuis roproxy
 # -----------------------------
-@app.route("/gamepasses/<int:place_id>")
-def get_gamepasses(place_id):
-    urls = [
-        f"https://www.roproxy.com/games/getgamepassesinnerpartial?startIndex=0&maxRows=50&placeId={place_id}",
-        f"https://roblox.com.proxy.robloxapi.dev/games/getgamepassesinnerpartial?startIndex=0&maxRows=50&placeId={place_id}",
-        f"https://games.roproxy.com/games/getgamepassesinnerpartial?startIndex=0&maxRows=50&placeId={place_id}"
-    ]
-
-    html = None
+def fetch_html(place_id, timeout=10):
+    url = f"https://www.roproxy.com/games/getgamepassesinnerpartial?startIndex=0&maxRows=50&placeId={place_id}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     }
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout)
+        if r.status_code == 200 and "real-game-pass" in r.text:
+            return r.text
+        else:
+            print(f"[GamePassAPI] Unexpected status or no game passes at {url} (status {r.status_code})")
+    except Exception as e:
+        print(f"[GamePassAPI] Failed to fetch {url}: {e}")
+    return None
 
-    for url in urls:
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code == 200 and "real-game-pass" in r.text:
-                html = r.text
-                break
-        except Exception as e:
-            print(f"[GamePassAPI] Failed to fetch {url}: {e}")
+# -----------------------------
+# Parser HTML en JSON
+# -----------------------------
+def parse_gamepasses(html, place_id):
+    gamepasses = []
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for li in soup.select("li.real-game-pass"):
+            try:
+                name_tag = li.select_one(".store-card-name")
+                price_tag = li.select_one(".text-robux")
+                img_tag = li.select_one("img")
+                link_tag = li.select_one("a.gear-passes-asset")
+
+                gamepasses.append({
+                    "name": name_tag["title"].strip() if name_tag and name_tag.has_attr("title") else "Unknown",
+                    "price": int(price_tag.text.strip()) if price_tag else 0,
+                    "expectedPrice": int(price_tag.text.strip()) if price_tag else 0,
+                    "icon": img_tag["src"] if img_tag and img_tag.has_attr("src") else DEFAULT_ICON,
+                    "passId": int(link_tag["href"].split("/")[2]) if link_tag and link_tag.has_attr("href") else 0,
+                    "productId": 0,
+                    "sellerId": 0,
+                    "status": "Buy"
+                })
+            except Exception as e:
+                print(f"[GamePassAPI] Failed to parse a pass for placeId {place_id}: {e}")
+    except Exception as e:
+        print(f"[GamePassAPI] Failed to parse HTML for placeId {place_id}: {e}")
+    return gamepasses
+
+# -----------------------------
+# Route principale /gamepasses/<place_id>
+# -----------------------------
+@app.route("/gamepasses/<int:place_id>")
+def get_gamepasses(place_id):
+    # Vérifier le cache
+    if place_id in cache:
+        ts, data = cache[place_id]
+        if time.time() - ts < CACHE_DURATION:
+            return Response(json.dumps(data, indent=2), mimetype="application/json")
+
+    html = fetch_html(place_id)
 
     if not html:
-        return jsonify({"error": "failed_to_fetch", "gamepasses": [], "placeId": place_id}), 502
+        result = {
+            "error": "failed_to_fetch",
+            "message": f"No valid HTML received from roproxy for placeId {place_id}",
+            "gamepasses": [],
+            "placeId": place_id
+        }
+        return Response(json.dumps(result, indent=2), mimetype="application/json")
 
-    # -----------------------------
-    # Parser HTML
-    # -----------------------------
-    soup = BeautifulSoup(html, "html.parser")
-    gamepasses = []
+    gamepasses = parse_gamepasses(html, place_id)
 
-    for li in soup.select("li.real-game-pass"):
-        try:
-            name_tag = li.select_one(".store-card-name")
-            price_tag = li.select_one(".text-robux")
-            img_tag = li.select_one("img")
-            link_tag = li.select_one("a.gear-passes-asset")
+    # Sauvegarder dans le cache
+    cache[place_id] = (time.time(), gamepasses)
 
-            gamepasses.append({
-                "name": name_tag["title"].strip() if name_tag and name_tag.has_attr("title") else "Unknown",
-                "price": int(price_tag.text.strip()) if price_tag else 0,
-                "expectedPrice": int(price_tag.text.strip()) if price_tag else 0,
-                "icon": img_tag["src"] if img_tag and img_tag.has_attr("src") else DEFAULT_ICON,
-                "passId": int(link_tag["href"].split("/")[2]) if link_tag and link_tag.has_attr("href") else 0,
-                "productId": 0,  # optionnel: tu peux récupérer via MarketplaceService si besoin
-                "sellerId": 0,
-                "status": "Buy"
-            })
-        except Exception as e:
-            print(f"[GamePassAPI] Failed to parse a pass: {e}")
-
-    return jsonify(gamepasses)
+    return Response(json.dumps(gamepasses, indent=2), mimetype="application/json")
 
 # -----------------------------
 # Main
