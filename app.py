@@ -30,43 +30,60 @@ def get_gamepasses(place_id):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     }
 
+    # -----------------------------
+    # Essaye tous les proxys
+    # -----------------------------
     for url in urls:
         try:
             r = requests.get(url, headers=headers, timeout=10)
             if r.status_code == 200 and "real-game-pass" in r.text:
                 html = r.text
                 break
+            else:
+                print(f"[GamePassAPI] Unexpected status or no game passes at {url} (status {r.status_code})")
         except Exception as e:
             print(f"[GamePassAPI] Failed to fetch {url}: {e}")
 
     if not html:
-        return jsonify({"error": "failed_to_fetch", "gamepasses": [], "placeId": place_id}), 502
+        return jsonify({
+            "error": "failed_to_fetch",
+            "message": f"No valid HTML received from any proxy for placeId {place_id}",
+            "gamepasses": [],
+            "placeId": place_id
+        }), 502
 
     # -----------------------------
     # Parser HTML
     # -----------------------------
-    soup = BeautifulSoup(html, "html.parser")
     gamepasses = []
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for li in soup.select("li.real-game-pass"):
+            try:
+                name_tag = li.select_one(".store-card-name")
+                price_tag = li.select_one(".text-robux")
+                img_tag = li.select_one("img")
+                link_tag = li.select_one("a.gear-passes-asset")
 
-    for li in soup.select("li.real-game-pass"):
-        try:
-            name_tag = li.select_one(".store-card-name")
-            price_tag = li.select_one(".text-robux")
-            img_tag = li.select_one("img")
-            link_tag = li.select_one("a.gear-passes-asset")
-
-            gamepasses.append({
-                "name": name_tag["title"].strip() if name_tag and name_tag.has_attr("title") else "Unknown",
-                "price": int(price_tag.text.strip()) if price_tag else 0,
-                "expectedPrice": int(price_tag.text.strip()) if price_tag else 0,
-                "icon": img_tag["src"] if img_tag and img_tag.has_attr("src") else DEFAULT_ICON,
-                "passId": int(link_tag["href"].split("/")[2]) if link_tag and link_tag.has_attr("href") else 0,
-                "productId": 0,  # optionnel: tu peux récupérer via MarketplaceService si besoin
-                "sellerId": 0,
-                "status": "Buy"
-            })
-        except Exception as e:
-            print(f"[GamePassAPI] Failed to parse a pass: {e}")
+                gamepasses.append({
+                    "name": name_tag["title"].strip() if name_tag and name_tag.has_attr("title") else "Unknown",
+                    "price": int(price_tag.text.strip()) if price_tag else 0,
+                    "expectedPrice": int(price_tag.text.strip()) if price_tag else 0,
+                    "icon": img_tag["src"] if img_tag and img_tag.has_attr("src") else DEFAULT_ICON,
+                    "passId": int(link_tag["href"].split("/")[2]) if link_tag and link_tag.has_attr("href") else 0,
+                    "productId": 0,
+                    "sellerId": 0,
+                    "status": "Buy"
+                })
+            except Exception as e:
+                print(f"[GamePassAPI] Failed to parse a pass: {e}")
+    except Exception as e:
+        return jsonify({
+            "error": "parsing_failed",
+            "message": str(e),
+            "gamepasses": [],
+            "placeId": place_id
+        }), 502
 
     return jsonify(gamepasses)
 
