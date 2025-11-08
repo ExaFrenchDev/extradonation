@@ -23,6 +23,20 @@ def ping():
     return jsonify({"status": "ok"})
 
 # -----------------------------
+# Convertit un universeId en rootPlaceId si nécessaire
+# -----------------------------
+def universe_to_place(universe_id):
+    try:
+        r = requests.get(f"https://games.roproxy.com/v1/games?universeIds={universe_id}", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            if "data" in data and len(data["data"]) > 0:
+                return data["data"][0]["rootPlaceId"]
+    except Exception as e:
+        print(f"[GamePassAPI] Failed to convert universeId {universe_id}: {e}")
+    return universe_id  # fallback
+
+# -----------------------------
 # Récupère HTML depuis roproxy
 # -----------------------------
 def fetch_html(place_id, timeout=10):
@@ -75,27 +89,30 @@ def parse_gamepasses(html, place_id):
 # -----------------------------
 @app.route("/gamepasses/<int:place_id>")
 def get_gamepasses(place_id):
+    # Conversion automatique si un universeId est fourni
+    real_place_id = universe_to_place(place_id)
+
     # Vérifier le cache
-    if place_id in cache:
-        ts, data = cache[place_id]
+    if real_place_id in cache:
+        ts, data = cache[real_place_id]
         if time.time() - ts < CACHE_DURATION:
             return Response(json.dumps(data, indent=2), mimetype="application/json")
 
-    html = fetch_html(place_id)
+    html = fetch_html(real_place_id)
 
     if not html:
         result = {
             "error": "failed_to_fetch",
-            "message": f"No valid HTML received from roproxy for placeId {place_id}",
+            "message": f"No valid HTML received from roproxy for placeId {real_place_id}",
             "gamepasses": [],
-            "placeId": place_id
+            "placeId": real_place_id
         }
         return Response(json.dumps(result, indent=2), mimetype="application/json")
 
-    gamepasses = parse_gamepasses(html, place_id)
+    gamepasses = parse_gamepasses(html, real_place_id)
 
     # Sauvegarder dans le cache
-    cache[place_id] = (time.time(), gamepasses)
+    cache[real_place_id] = (time.time(), gamepasses)
 
     return Response(json.dumps(gamepasses, indent=2), mimetype="application/json")
 
