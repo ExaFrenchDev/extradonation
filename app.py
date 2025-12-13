@@ -29,6 +29,7 @@ from flask import Flask, Response, jsonify, request
 import requests
 from bs4 import BeautifulSoup
 import json
+from threading import Thread
 
 app = Flask(__name__)
 
@@ -41,19 +42,47 @@ CACHE_DURATION = 10 * 60  # 10 minutes
 cache = {}  # placeId -> (timestamp, data)
 
 # -----------------------------
+# Keep-Alive System
+# -----------------------------
+KEEP_ALIVE_INTERVAL = 5 * 60  # Ping toutes les 5 minutes
+
+def keep_alive_worker():
+    """Thread qui ping le serveur régulièrement pour éviter la mise en veille"""
+    while True:
+        try:
+            time.sleep(KEEP_ALIVE_INTERVAL)
+            # Auto-ping sur la route /ping
+            port = int(os.environ.get("PORT", 8080))
+            url = f"http://localhost:{port}/ping"
+            requests.get(url, timeout=5)
+            print(f"[KeepAlive] Ping effectué à {time.strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"[KeepAlive] Erreur lors du ping : {e}")
+
+def start_keep_alive():
+    """Démarre le thread de keep-alive en arrière-plan"""
+    thread = Thread(target=keep_alive_worker, daemon=True)
+    thread.start()
+    print("[KeepAlive] Système de keep-alive démarré")
+
+# -----------------------------
 # Route test / ping
 # -----------------------------
 @app.route("/ping")
 def ping():
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "timestamp": time.time(),
+        "uptime": "running"
+    })
 
 # -----------------------------
-# Helper : récupérer le rootPlaceId depuis l'univers
+# Helper : récupérer le rootPlaceId depuis l'univers (RAPIDE)
 # -----------------------------
 def get_root_place_id_from_universe(universe_id):
     url = f"https://games.roproxy.com/v1/games?universeIds={universe_id}"
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=3)
         if r.status_code == 200:
             data = r.json()
             if "data" in data and len(data["data"]) > 0:
@@ -63,17 +92,25 @@ def get_root_place_id_from_universe(universe_id):
     return None
 
 # -----------------------------
-# Récupère HTML depuis roproxy
+# Récupère HTML depuis roproxy (RAPIDE)
 # -----------------------------
-def fetch_html(place_id, timeout=10):
+def fetch_html(place_id, timeout=3):
     url = f"https://www.roproxy.com/games/getgamepassesinnerpartial?startIndex=0&maxRows=50&placeId={place_id}"
     headers = {
         "User-Agent": "Mozilla/5.0"
     }
     try:
         r = requests.get(url, headers=headers, timeout=timeout)
-        if r.status_code == 200 and "real-game-pass" in r.text:
-            return r.text
+        # Check IMMÉDIAT : si pas de gamepass, on retourne None direct
+        if r.status_code == 200:
+            if "real-game-pass" in r.text:
+                return r.text
+            else:
+                print(f"[GamePassAPI] No gamepasses found for placeId {place_id} - skipping")
+                return None
+    except requests.exceptions.Timeout:
+        print(f"[GamePassAPI] Timeout for placeId {place_id} - skipping")
+        return None
     except Exception as e:
         print(f"[GamePassAPI] Failed to fetch {url}: {e}")
     return None
@@ -109,21 +146,25 @@ def parse_gamepasses(html, place_id):
     return gamepasses
 
 # -----------------------------
-# Fallback : essaye rootPlaceId si aucun gamepass trouvé
+# Fallback : essaye rootPlaceId si aucun gamepass trouvé (OPTIMISÉ)
 # -----------------------------
 def fetch_gamepasses(place_id, universe_id=None):
-    # 1️⃣ Essayer le placeId
+    # 1️⃣ Essayer le placeId (timeout 3s)
     html = fetch_html(place_id)
-    passes = parse_gamepasses(html, place_id) if html else []
-
-    # 2️⃣ Si vide et qu'on a un universeId, fallback avec rootPlaceId
-    if not passes and universe_id:
-        root_place_id = get_root_place_id_from_universe(universe_id)
-        if root_place_id:
-            html = fetch_html(root_place_id)
-            passes = parse_gamepasses(html, root_place_id) if html else []
-
-    return passes
+    
+    # Si HTML = None, ça veut dire pas de gamepass, on skip direct
+    if html is None:
+        # 2️⃣ Fallback rapide avec rootPlaceId si disponible
+        if universe_id:
+            root_place_id = get_root_place_id_from_universe(universe_id)
+            if root_place_id and root_place_id != place_id:
+                html = fetch_html(root_place_id)
+                if html:
+                    return parse_gamepasses(html, root_place_id)
+        return []
+    
+    # Si on a du HTML, on parse
+    return parse_gamepasses(html, place_id)
 
 # -----------------------------
 # Route principale /gamepasses/<place_id>
@@ -155,5 +196,8 @@ def get_gamepasses(place_id):
 # Main
 # -----------------------------
 if __name__ == "__main__":
+    # Démarrer le système de keep-alive
+    start_keep_alive()
+    
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
