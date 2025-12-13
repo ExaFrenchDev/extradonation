@@ -29,6 +29,7 @@ from flask import Flask, Response, jsonify, request
 import requests
 from bs4 import BeautifulSoup
 import json
+from threading import Thread
 
 app = Flask(__name__)
 
@@ -41,11 +42,39 @@ CACHE_DURATION = 10 * 60  # 10 minutes
 cache = {}  # placeId -> (timestamp, data)
 
 # -----------------------------
+# Keep-Alive System
+# -----------------------------
+KEEP_ALIVE_INTERVAL = 5 * 60  # Ping toutes les 5 minutes
+
+def keep_alive_worker():
+    """Thread qui ping le serveur régulièrement pour éviter la mise en veille"""
+    while True:
+        try:
+            time.sleep(KEEP_ALIVE_INTERVAL)
+            # Auto-ping sur la route /ping
+            port = int(os.environ.get("PORT", 8080))
+            url = f"http://localhost:{port}/ping"
+            requests.get(url, timeout=5)
+            print(f"[KeepAlive] Ping effectué à {time.strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"[KeepAlive] Erreur lors du ping : {e}")
+
+def start_keep_alive():
+    """Démarre le thread de keep-alive en arrière-plan"""
+    thread = Thread(target=keep_alive_worker, daemon=True)
+    thread.start()
+    print("[KeepAlive] Système de keep-alive démarré")
+
+# -----------------------------
 # Route test / ping
 # -----------------------------
 @app.route("/ping")
 def ping():
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "timestamp": time.time(),
+        "uptime": "running"
+    })
 
 # -----------------------------
 # Helper : récupérer le rootPlaceId depuis l'univers
@@ -155,5 +184,8 @@ def get_gamepasses(place_id):
 # Main
 # -----------------------------
 if __name__ == "__main__":
+    # Démarrer le système de keep-alive
+    start_keep_alive()
+    
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
