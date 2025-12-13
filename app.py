@@ -1,3 +1,28 @@
+import subprocess
+import sys
+import importlib
+import platform
+
+modules = [
+    "os",
+    "time",
+    "requests",
+    "bs4",
+    "json",
+    "flask",
+]
+
+def install_missing_modules():
+    for module in modules:
+        try:
+            importlib.import_module(module.split('==')[0])
+        except ImportError:
+            print("Installation du module manquant : {}".format(module))
+            subprocess.check_call([sys.executable, "-m", "pip", "install", module])
+
+install_missing_modules()
+
+
 import os
 import time
 from flask import Flask, Response, jsonify, request
@@ -130,5 +155,5 @@ def get_gamepasses(place_id):
 # Main
 # -----------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
