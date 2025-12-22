@@ -35,6 +35,12 @@ app = Flask(__name__)
 DEFAULT_ICON = "https://tr.rbxcdn.com/180DAY-9babd76e0a0b581e7f689f06cac80194/150/150/Image/Webp/noFilter"
 
 # -----------------------------
+# Configuration retry
+# -----------------------------
+MAX_RETRIES = 5  # Nombre maximum de tentatives
+RETRY_DELAY = 2  # Délai entre chaque tentative (en secondes)
+
+# -----------------------------
 # Cache interne
 # -----------------------------
 CACHE_DURATION = 10 * 60  # 10 minutes
@@ -109,21 +115,40 @@ def parse_gamepasses(html, place_id):
     return gamepasses
 
 # -----------------------------
-# Fallback : essaye rootPlaceId si aucun gamepass trouvé
+# Fetch avec retry automatique
 # -----------------------------
-def fetch_gamepasses(place_id, universe_id=None):
-    # 1️⃣ Essayer le placeId
-    html = fetch_html(place_id)
-    passes = parse_gamepasses(html, place_id) if html else []
+def fetch_gamepasses_with_retry(place_id, universe_id=None):
+    attempt = 0
+    
+    while attempt < MAX_RETRIES:
+        attempt += 1
+        print(f"[GamePassAPI] Tentative {attempt}/{MAX_RETRIES} pour placeId {place_id}")
+        
+        # 1️⃣ Essayer le placeId
+        html = fetch_html(place_id)
+        passes = parse_gamepasses(html, place_id) if html else []
 
-    # 2️⃣ Si vide et qu'on a un universeId, fallback avec rootPlaceId
-    if not passes and universe_id:
-        root_place_id = get_root_place_id_from_universe(universe_id)
-        if root_place_id:
-            html = fetch_html(root_place_id)
-            passes = parse_gamepasses(html, root_place_id) if html else []
+        # 2️⃣ Si vide et qu'on a un universeId, fallback avec rootPlaceId
+        if not passes and universe_id:
+            print(f"[GamePassAPI] Aucun gamepass trouvé, essai avec rootPlaceId de l'univers {universe_id}")
+            root_place_id = get_root_place_id_from_universe(universe_id)
+            if root_place_id and root_place_id != place_id:
+                html = fetch_html(root_place_id)
+                passes = parse_gamepasses(html, root_place_id) if html else []
 
-    return passes
+        # ✅ Si on a trouvé des gamepasses, on retourne
+        if passes:
+            print(f"[GamePassAPI] ✅ {len(passes)} gamepass(es) trouvé(s) à la tentative {attempt}")
+            return passes
+        
+        # ⚠️ Si aucun gamepass et qu'on n'a pas atteint le max de tentatives
+        if attempt < MAX_RETRIES:
+            print(f"[GamePassAPI] ⚠️ Aucun gamepass trouvé, nouvelle tentative dans {RETRY_DELAY}s...")
+            time.sleep(RETRY_DELAY)
+    
+    # ❌ Après toutes les tentatives, on retourne une liste vide
+    print(f"[GamePassAPI] ❌ Aucun gamepass trouvé après {MAX_RETRIES} tentatives pour placeId {place_id}")
+    return []
 
 # -----------------------------
 # Route principale /gamepasses/<place_id>
@@ -142,11 +167,13 @@ def get_gamepasses(place_id):
     if place_id in cache:
         ts, data = cache[place_id]
         if time.time() - ts < CACHE_DURATION:
+            print(f"[GamePassAPI] 📦 Réponse depuis le cache pour placeId {place_id}")
             return Response(json.dumps(data, indent=2), mimetype="application/json")
 
-    passes = fetch_gamepasses(place_id, universe_id)
+    # Fetch avec retry automatique
+    passes = fetch_gamepasses_with_retry(place_id, universe_id)
 
-    # Sauvegarder dans le cache
+    # Sauvegarder dans le cache (même si vide, pour éviter de spammer l'API)
     cache[place_id] = (time.time(), passes)
 
     return Response(json.dumps(passes, indent=2), mimetype="application/json")
