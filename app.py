@@ -29,6 +29,7 @@ from flask import Flask, Response, jsonify, request
 import requests
 from bs4 import BeautifulSoup
 import json
+from threading import Thread
 
 app = Flask(__name__)
 
@@ -41,11 +42,28 @@ CACHE_DURATION = 10 * 60  # 10 minutes
 cache = {}  # placeId -> (timestamp, data)
 
 # -----------------------------
+# Keep-Alive Configuration
+# -----------------------------
+KEEP_ALIVE_INTERVAL = 5 * 60  # Ping toutes les 5 minutes
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8080")  # URL de ton hébergeur
+
+def keep_alive():
+    """Thread qui envoie des requêtes ping régulières pour garder le serveur actif"""
+    while True:
+        try:
+            time.sleep(KEEP_ALIVE_INTERVAL)
+            # Envoie une requête ping à soi-même
+            requests.get(f"{BASE_URL}/ping", timeout=5)
+            print(f"[Keep-Alive] Ping envoyé à {time.strftime('%H:%M:%S')}")
+        except Exception as e:
+            print(f"[Keep-Alive] Erreur lors du ping: {e}")
+
+# -----------------------------
 # Route test / ping
 # -----------------------------
 @app.route("/ping")
 def ping():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "timestamp": time.time()})
 
 # -----------------------------
 # Helper : récupérer le rootPlaceId depuis l'univers
@@ -156,4 +174,10 @@ def get_gamepasses(place_id):
 # -----------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
+    
+    # Démarre le thread de keep-alive en arrière-plan
+    keep_alive_thread = Thread(target=keep_alive, daemon=True)
+    keep_alive_thread.start()
+    print("[Keep-Alive] Thread démarré")
+    
     app.run(host="0.0.0.0", port=port)
